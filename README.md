@@ -12,7 +12,7 @@
 
 ## 📖 在线体验 (Live Demo)
 *(如果使用了 GitHub Pages 部署，把你的页面链接放在这里)*
-🔗 **点击直接访问：[https://your-username.github.io/esp32-web-ble-ota/](https://your-username.github.io/esp32-web-ble-ota/)**
+🔗 **点击直接访问：[https://liuwentao12.github.io/esp32-ble-ota-web/]**
 
 ---
 
