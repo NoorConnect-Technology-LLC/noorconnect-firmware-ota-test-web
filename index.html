@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Web BLE OTA Tool</title>
+    <style>
+        :root { --primary: #007bff; --success: #28a745; --bg: #f8f9fa; --text: #333; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; background-color: var(--bg); color: var(--text); padding: 20px; display: flex; justify-content: center; }
+        .container { background: #fff; padding: 30px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.1); width: 100%; max-width: 500px; }
+        h2 { margin-top: 0; text-align: center; color: var(--primary); }
+        .form-group { margin-bottom: 20px; }
+        label { font-weight: bold; display: block; margin-bottom: 8px; }
+        input[type="file"] { width: 100%; padding: 10px; border: 1px dashed #ccc; border-radius: 6px; cursor: pointer; }
+        button { width: 100%; padding: 14px; font-size: 16px; font-weight: bold; color: #fff; background-color: var(--primary); border: none; border-radius: 6px; cursor: pointer; transition: 0.3s; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        button:hover:not(:disabled) { background-color: #0056b3; }
+        .progress-container { width: 100%; background-color: #e9ecef; border-radius: 8px; margin-top: 20px; height: 24px; overflow: hidden; display: none; }
+        .progress-bar { width: 0%; height: 100%; background-color: var(--success); transition: width 0.2s ease; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
+        .console { background: #1e1e1e; color: #00ff00; padding: 15px; border-radius: 8px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 13px; margin-top: 20px; }
+        .console p { margin: 5px 0; border-bottom: 1px dashed #333; padding-bottom: 5px; }
+        .log-err { color: #ff4c4c; }
+        .log-warn { color: #ffc107; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>ESP32 Web BLE OTA Tool</h2>
+    
+    <div class="form-group">
+        <label for="fileInput">1. 选择固件 (.bin)</label>
+        <input type="file" id="fileInput" accept=".bin">
+    </div>
+
+    <button id="connectBtn">2. 连接设备并升级</button>
+
+    <div class="progress-container" id="progressBox">
+        <div class="progress-bar" id="progressBar">0%</div>
+    </div>
+
+    <label style="margin-top: 20px;">运行日志:</label>
+    <div class="console" id="consoleBox"></div>
+</div>
+
+<script>
+    // 协议 UUID 定义 (极简双通道 OTA 协议)
+    const UUID_SERVICE = 0xFFF0;
+    const UUID_DATA    = 0xFFF3;
+    const UUID_CMD     = 0xFFF4;
+
+    const connectBtn = document.getElementById('connectBtn');
+    const fileInput = document.getElementById('fileInput');
+    const progressBox = document.getElementById('progressBox');
+    const progressBar = document.getElementById('progressBar');
+    const consoleBox = document.getElementById('consoleBox');
+
+    function log(msg, type = 'info') {
+        const p = document.createElement('p');
+        p.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        if (type === 'err') p.className = 'log-err';
+        if (type === 'warn') p.className = 'log-warn';
+        consoleBox.appendChild(p);
+        consoleBox.scrollTop = consoleBox.scrollHeight; 
+    }
+
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    connectBtn.addEventListener('click', async () => {
+        if (fileInput.files.length === 0) {
+            alert("请先选择编译好的 .bin 固件文件！");
+            return;
+        }
+
+        const file = fileInput.files[0];
+        const buffer = await file.arrayBuffer();
+        const firmwareArray = new Uint8Array(buffer);
+        
+        let device, server;
+
+        try {
+            log("正在请求选择蓝牙设备...");
+            // 取消了硬编码的名称前缀，允许选择所有设备，但必须声明使用 FFF0 服务
+            device = await navigator.bluetooth.requestDevice({
+                acceptAllDevices: true,
+                optionalServices: [UUID_SERVICE]
+            });
+
+            device.addEventListener('gattserverdisconnected', () => {
+                log("蓝牙连接已断开", "warn");
+            });
+
+            log(`已选择设备: ${device.name}，正在连接 GATT...`);
+            server = await device.gatt.connect();
+            log("GATT 连接成功！正在获取 OTA 服务 (0xFFF0)...");
+            
+            const service = await server.getPrimaryService(UUID_SERVICE);
+            const charData = await service.getCharacteristic(UUID_DATA);
+            const charCmd = await service.getCharacteristic(UUID_CMD);
+
+            log("通道获取成功，准备发送 OTA 开始指令 (0x01)...");
+            connectBtn.disabled = true;
+
+            // 处理加密配对 (如 CTKD) 及设备重试逻辑
+            let startCmdSent = false;
+            let retryCount = 0;
+            while (!startCmdSent && retryCount < 3) {
+                try {
+                    await charCmd.writeValue(new Uint8Array([0x01]));
+                    startCmdSent = true;
+                    log("开始指令发送成功！");
+                } catch (err) {
+                    retryCount++;
+                    log(`写入被拒绝，可能是设备要求配对加密。请在手机/电脑弹窗中点击【同意配对】！等待 5 秒重试... (${retryCount}/3)`, "warn");
+                    await sleep(5000); 
+                }
+            }
+
+            if (!startCmdSent) {
+                throw new Error("配对失败或设备拒绝写入。建议在系统设置中先手动配对蓝牙后再试。");
+            }
+
+            log("正在等待 ESP32 擦除 Flash (预计 2 秒)...");
+            await sleep(2000); 
+
+            // 开始切片发送
+            progressBox.style.display = 'block';
+            let offset = 0;
+            const chunkSize = 240; 
+            const totalSize = firmwareArray.length;
+            
+            log(`开始发送固件，总大小: ${totalSize} bytes`);
+            
+            const startTime = performance.now();
+
+            while (offset < totalSize) {
+                const currentChunkSize = Math.min(chunkSize, totalSize - offset);
+                const chunk = firmwareArray.slice(offset, offset + currentChunkSize);
+                
+                await charData.writeValueWithoutResponse(chunk);
+                
+                offset += currentChunkSize;
+                
+                const percent = Math.floor((offset / totalSize) * 100);
+                progressBar.style.width = percent + '%';
+                progressBar.textContent = percent + '%';
+                
+                // 防丢包延时
+                await sleep(20); 
+            }
+
+            const endTime = performance.now();
+            const timeSeconds = ((endTime - startTime) / 1000).toFixed(1);
+            const speed = (totalSize / 1024 / timeSeconds).toFixed(1);
+            log(`传输完成！耗时: ${timeSeconds}秒, 速度: ${speed} KB/s`);
+
+            // 发送结束指令
+            log("正在发送结束指令 (0x02)，请等待设备校验并重启...");
+            await charCmd.writeValue(new Uint8Array([0x02]));
+            
+            log("🎉 OTA 升级流程全部结束！", "success");
+            
+            setTimeout(() => {
+                if (device && device.gatt.connected) {
+                    device.gatt.disconnect();
+                }
+                connectBtn.disabled = false;
+            }, 3000);
+
+        } catch (error) {
+            log(`错误: ${error.message}`, "err");
+            connectBtn.disabled = false;
+        }
+    });
+</script>
+
+</body>
+</html>
