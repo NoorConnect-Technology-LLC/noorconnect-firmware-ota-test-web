@@ -21,6 +21,14 @@
         .console p { margin: 5px 0; border-bottom: 1px dashed #333; padding-bottom: 5px; }
         .log-err { color: #ff4c4c; }
         .log-warn { color: #ffc107; }
+        .log-success { color: var(--success); }
+        details { margin-top: 15px; border: 1px solid #eee; border-radius: 8px; padding: 10px; }
+        summary { cursor: pointer; font-weight: bold; color: #666; font-size: 14px; outline: none; }
+        .settings-group { margin-top: 10px; font-size: 13px; }
+        .settings-group label { font-weight: normal; margin-bottom: 4px; color: #555; }
+        .settings-group input { width: 100%; padding: 6px; border: 1px solid #ddd; border-radius: 4px; margin-bottom: 8px; font-family: monospace; box-sizing: border-box; }
+        .settings-row { display: flex; gap: 10px; }
+        .settings-row div { flex: 1; }
     </style>
 </head>
 <body>
@@ -35,6 +43,31 @@
 
     <button id="connectBtn">2. 连接设备并升级</button>
 
+    <details id="advancedSettings">
+        <summary>⚙️ 高级设置 (自定义 UUID 与参数)</summary>
+        <div class="settings-group">
+            <label>服务 Service UUID:</label>
+            <input type="text" id="uuidService" placeholder="e892fff0-e251-40b9-8c20-a10c2fc0ce6b">
+            
+            <label>数据通道 Data UUID:</label>
+            <input type="text" id="uuidData" placeholder="e892fff3-e251-40b9-8c20-a10c2fc0ce6b">
+            
+            <label>控制通道 CMD UUID:</label>
+            <input type="text" id="uuidCmd" placeholder="e892fff4-e251-40b9-8c20-a10c2fc0ce6b">
+
+            <div class="settings-row">
+                <div>
+                    <label>分包大小 (Bytes):</label>
+                    <input type="number" id="chunkSize" value="240">
+                </div>
+                <div>
+                    <label>发送间隔 (ms):</label>
+                    <input type="number" id="chunkDelay" value="20">
+                </div>
+            </div>
+        </div>
+    </details>
+
     <div class="progress-container" id="progressBox">
         <div class="progress-bar" id="progressBar">0%</div>
     </div>
@@ -44,22 +77,51 @@
 </div>
 
 <script>
-    // 协议 UUID 定义 (极简双通道 OTA 协议)
-    const UUID_SERVICE = 0xFFF0;
-    const UUID_DATA    = 0xFFF3;
-    const UUID_CMD     = 0xFFF4;
+    // 默认 UUID 与参数
+    const DEFAULTS = {
+        service: "e892fff0-e251-40b9-8c20-a10c2fc0ce6b",
+        data: "e892fff3-e251-40b9-8c20-a10c2fc0ce6b",
+        cmd: "e892fff4-e251-40b9-8c20-a10c2fc0ce6b",
+        size: 240,
+        delay: 20
+    };
 
     const connectBtn = document.getElementById('connectBtn');
     const fileInput = document.getElementById('fileInput');
     const progressBox = document.getElementById('progressBox');
     const progressBar = document.getElementById('progressBar');
     const consoleBox = document.getElementById('consoleBox');
+    const inputService = document.getElementById('uuidService');
+    const inputData = document.getElementById('uuidData');
+    const inputCmd = document.getElementById('uuidCmd');
+    const inputSize = document.getElementById('chunkSize');
+    const inputDelay = document.getElementById('chunkDelay');
+
+    // 初始化：从 LocalStorage 加载或使用默认值
+    function initSettings() {
+        inputService.value = localStorage.getItem('ota_uuid_service') || DEFAULTS.service;
+        inputData.value = localStorage.getItem('ota_uuid_data') || DEFAULTS.data;
+        inputCmd.value = localStorage.getItem('ota_uuid_cmd') || DEFAULTS.cmd;
+        inputSize.value = localStorage.getItem('ota_chunk_size') || DEFAULTS.size;
+        inputDelay.value = localStorage.getItem('ota_chunk_delay') || DEFAULTS.delay;
+    }
+
+    function saveSettings() {
+        localStorage.setItem('ota_uuid_service', inputService.value.trim());
+        localStorage.setItem('ota_uuid_data', inputData.value.trim());
+        localStorage.setItem('ota_uuid_cmd', inputCmd.value.trim());
+        localStorage.setItem('ota_chunk_size', inputSize.value);
+        localStorage.setItem('ota_chunk_delay', inputDelay.value);
+    }
+
+    initSettings();
 
     function log(msg, type = 'info') {
         const p = document.createElement('p');
         p.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
         if (type === 'err') p.className = 'log-err';
         if (type === 'warn') p.className = 'log-warn';
+        if (type === 'success') p.className = 'log-success';
         consoleBox.appendChild(p);
         consoleBox.scrollTop = consoleBox.scrollHeight; 
     }
@@ -72,6 +134,14 @@
             return;
         }
 
+        // 获取并保存当前配置
+        saveSettings();
+        const UUID_SERVICE = inputService.value.trim().toLowerCase();
+        const UUID_DATA = inputData.value.trim().toLowerCase();
+        const UUID_CMD = inputCmd.value.trim().toLowerCase();
+        const chunkSize = parseInt(inputSize.value) || 240;
+        const chunkDelay = parseInt(inputDelay.value) || 20;
+
         const file = fileInput.files[0];
         const buffer = await file.arrayBuffer();
         const firmwareArray = new Uint8Array(buffer);
@@ -80,19 +150,19 @@
 
         try {
             log("正在请求选择蓝牙设备...");
-            // 取消了硬编码的名称前缀，允许选择所有设备，但必须声明使用 FFF0 服务
+            // 自动过滤仅显示具备 OTA 服务的设备
             device = await navigator.bluetooth.requestDevice({
-                acceptAllDevices: true,
-                optionalServices: [UUID_SERVICE]
+                filters: [{ services: [UUID_SERVICE] }]
             });
 
             device.addEventListener('gattserverdisconnected', () => {
                 log("蓝牙连接已断开", "warn");
+                connectBtn.disabled = false;
             });
 
             log(`已选择设备: ${device.name}，正在连接 GATT...`);
             server = await device.gatt.connect();
-            log("GATT 连接成功！正在获取 OTA 服务 (0xFFF0)...");
+            log("GATT 连接成功！正在获取 OTA 服务...");
             
             const service = await server.getPrimaryService(UUID_SERVICE);
             const charData = await service.getCharacteristic(UUID_DATA);
@@ -146,7 +216,7 @@
                 progressBar.textContent = percent + '%';
                 
                 // 防丢包延时
-                await sleep(20); 
+                if (chunkDelay > 0) await sleep(chunkDelay); 
             }
 
             const endTime = performance.now();
