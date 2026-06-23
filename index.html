@@ -46,6 +46,9 @@
     <details id="advancedSettings">
         <summary>⚙️ 高级设置 (自定义 UUID 与参数)</summary>
         <div class="settings-group">
+            <label>Device name prefix:</label>
+            <input type="text" id="deviceNamePrefix" placeholder="ESP32">
+
             <label>服务 Service UUID:</label>
             <input type="text" id="uuidService" placeholder="e892fff0-e251-40b9-8c20-a10c2fc0ce6b">
             
@@ -82,6 +85,7 @@
         service: "e892fff0-e251-40b9-8c20-a10c2fc0ce6b",
         data: "e892fff3-e251-40b9-8c20-a10c2fc0ce6b",
         cmd: "e892fff4-e251-40b9-8c20-a10c2fc0ce6b",
+        namePrefix: "ESP32",
         size: 240,
         delay: 20
     };
@@ -94,11 +98,13 @@
     const inputService = document.getElementById('uuidService');
     const inputData = document.getElementById('uuidData');
     const inputCmd = document.getElementById('uuidCmd');
+    const inputNamePrefix = document.getElementById('deviceNamePrefix');
     const inputSize = document.getElementById('chunkSize');
     const inputDelay = document.getElementById('chunkDelay');
 
     // 初始化：从 LocalStorage 加载或使用默认值
     function initSettings() {
+        inputNamePrefix.value = localStorage.getItem('ota_device_name_prefix') || DEFAULTS.namePrefix;
         inputService.value = localStorage.getItem('ota_uuid_service') || DEFAULTS.service;
         inputData.value = localStorage.getItem('ota_uuid_data') || DEFAULTS.data;
         inputCmd.value = localStorage.getItem('ota_uuid_cmd') || DEFAULTS.cmd;
@@ -107,6 +113,7 @@
     }
 
     function saveSettings() {
+        localStorage.setItem('ota_device_name_prefix', inputNamePrefix.value.trim());
         localStorage.setItem('ota_uuid_service', inputService.value.trim());
         localStorage.setItem('ota_uuid_data', inputData.value.trim());
         localStorage.setItem('ota_uuid_cmd', inputCmd.value.trim());
@@ -139,6 +146,7 @@
         const UUID_SERVICE = inputService.value.trim().toLowerCase();
         const UUID_DATA = inputData.value.trim().toLowerCase();
         const UUID_CMD = inputCmd.value.trim().toLowerCase();
+        const deviceNamePrefix = inputNamePrefix.value.trim();
         const chunkSize = parseInt(inputSize.value) || 240;
         const chunkDelay = parseInt(inputDelay.value) || 20;
 
@@ -150,10 +158,18 @@
 
         try {
             log("正在请求选择蓝牙设备...");
-            // 自动过滤仅显示具备 OTA 服务的设备
-            device = await navigator.bluetooth.requestDevice({
-                filters: [{ services: [UUID_SERVICE] }]
-            });
+            // 按设备名前缀过滤；OTA Service UUID 只作为连接后的可访问服务声明。
+            const requestOptions = deviceNamePrefix
+                ? {
+                    filters: [{ namePrefix: deviceNamePrefix }],
+                    optionalServices: [UUID_SERVICE]
+                }
+                : {
+                    acceptAllDevices: true,
+                    optionalServices: [UUID_SERVICE]
+                };
+
+            device = await navigator.bluetooth.requestDevice(requestOptions);
 
             device.addEventListener('gattserverdisconnected', () => {
                 log("蓝牙连接已断开", "warn");
